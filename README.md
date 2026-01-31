@@ -2,24 +2,25 @@
 
 This script allows you to interact with a Neewer GL1 LED panel over your network. You must configure the panel to connect to your wifi network for this script to work.
 
-The Neewer GL1 is a lower cost alternative to an El Gato Key Light. It supports Wifi (configured via mobile app). I reverse engineered the protocol between my computer and the light and found that the light listens for commands over UDP on port 5052. As far as I can tell, the light does not return any data such as current state.
+The Neewer GL1 is a lower cost alternative to an El Gato Key Light. It supports Wifi (configured via mobile app). Out of the box the light broadcasts its own SSID for setup (e.g. **ATK-625BFB**); you connect to that from the Neewer app to tell the light your home network. I reverse engineered the protocol between my computer and the light and found that the light listens for commands over UDP on port 5052. As far as I can tell, the light does not return any data such as current state.
 
 By being able to control the light using a script, you can integrate controls with something like a Stream Deck, which is how I use it.
 
 As of Version 2.0.0, you no longer need to keep the Neewer Live application running for it to work. In any case, the Neewer Live app on windows is a raging dumpster fire. If for whatever reason the app crashes, or your computer crashes, the app will stop working, because the `DeviceInfo.xml` and/or `UserInfo.xml` file(s) will be corrupted. That's because the executable is constantly updating those files, *and* requires them for operation. The application does not self-heal those files once they're corrupted. You basically need to back up those files and copy them back in when something goes wrong.
 
 
-In order to use this script, you basically need to know the IP adddress of the light, which you can get after you configure the light using the Neewer mobile app. You will also need to know the IP address of your computer, which is easy enough.
+In order to use this script, you need either the light’s IP address or hostname (`-h`) or its MAC address (`-m`). You can get the IP after configuring the light with the Neewer mobile app (though not within the app), or from your router or Wireshark. Using `-m` (MAC) looks up the current IP from your ARP table, so the light’s IP can change (e.g. DHCP) and the script still finds it—as long as something has talked to the light recently (this script or the Neewer app). You will also need to know the IP address of your computer, which is easy enough (`ipconfig getifaddr en0`).
 
 ## Parameters
 
 ```
--h, --host [required] ip or hostname
+-h, --host [char] light IP or hostname (use -h OR -m)
+-m, --mac [char] light MAC address (e.g. 08:F9:E0:62:5B:FB	). Resolves IP from your ARP table so the light’s IP can change (DHCP). Use -h OR -m.
 -I, --client_ip [char] your computer's IP. If you don't provide it, the script will try to guess your IP (first one it finds)
 -H, --hex
 -p, --power [on,off]
--b, --brightness (requires -t) 1-100
--t, --temperature (requires -b) 29-70
+-b, --brightness 1-100 (optional; default 100 if only -t is set)
+-t, --temperature 29-70 (optional; default 50 = 5000K if only -b is set)
 -d, --delay [int] in milliseconds. Default is 500. YMMV if you shorten the delay. The script may run faster, but may not execute.
 ```
 
@@ -55,11 +56,24 @@ node index.mjs -h 192.168.1.236 -p on  -b 10 -t 33 -I 192.168.1.100 -d 400
 # turn light off, script guesses your IP
 node index.mjs -h 192.168.1.236 -p off
 
+# using hostname (e.g. neewergl1pro from router/DHCP)
+node index.mjs -h neewergl1pro -p on
+node index.mjs -h neewergl1pro -p off -b 50 -t 33
+
 # set brightness to 10%, temperature to 3300k (light must be turned on first)
 node index.mjs -h 192.168.1.236 -b 10 -t 33
 
 # set brightness to 10%, temperature to 5000k using manual hex
 node index.mjs -h 192.168.1.236 -H 800503020a32c6
+
+# use MAC so the light’s IP can change (resolved from ARP)
+node index.mjs -m 08:F9:E0:62:5B:FB	 -p on -I 192.168.178.165
+node index.mjs -m 08:F9:E0:62:5B:FB	 -p off
+
+# set only brightness (temperature defaults to 5000K)
+node index.mjs -h 192.168.1.236 -b 50
+# set only temperature (brightness defaults to 100%)
+node index.mjs -h 192.168.1.236 -t 33
 
 ```
 

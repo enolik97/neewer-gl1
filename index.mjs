@@ -1,6 +1,6 @@
 // import dgram from 'dgram'
 // dgram with promises
-var PORT, command_delay, command_queue, convertIp, guessIp, hexify, options, parse_and_execute, presets, send;
+var PORT, command_delay, command_queue, convertIp, guessIp, hexify, normalizeMac, options, parse_and_execute, presets, resolveMacToIp, send;
 
 import {
   DgramAsPromised
@@ -16,6 +16,10 @@ import program from 'commander';
 
 import os from 'os';
 
+import {
+  execSync
+} from 'child_process';
+
 PORT = 5052;
 
 presets = {
@@ -23,7 +27,7 @@ presets = {
   "off": "800502010088"
 };
 
-program.version("Neewer GL1 Key Light Control 2.0").option("-h, --host [char]").option("-H, --hex [char]").option("-I, --client_ip [char]").option("-p, --power [off/on]").option("-b, --brightness [int]").option("-t, --temperature [int]").option("-d, --delay [int]").parse(process.argv);
+program.version("Neewer GL1 Key Light Control 2.0").option("-h, --host [char]").option("-m, --mac [char]", "light MAC address (e.g. 08:F9:E0:62:5B:FB	); resolves IP from ARP so IP changes are OK").option("-H, --hex [char]").option("-I, --client_ip [char]").option("-p, --power [off/on]").option("-b, --brightness [int]").option("-t, --temperature [int]").option("-d, --delay [int]").parse(process.argv);
 
 // Default command prints out a list of ports
 program.parse();
@@ -32,7 +36,7 @@ options = program.opts();
 
 command_queue = [];
 
-command_delay = 500;
+command_delay = 50;
 
 send = async function(host, port) {
   var bytes, client, closed, hexCommand, message;
@@ -75,6 +79,37 @@ guessIp = function() {
   return addresses.first().address;
 };
 
+normalizeMac = function(mac) {
+  var hex = mac.toLowerCase().replace(/[^a-f0-9]/g, '');
+  return hex.padStart(12, '0');
+};
+
+resolveMacToIp = function(mac) {
+  var i, ip, len, line, lineMac, match, normalized, output, ref;
+  normalized = normalizeMac(mac);
+  try {
+    output = execSync('arp -a', {
+      encoding: 'utf8'
+    });
+  } catch (error) {
+    return null;
+  }
+  ref = output.split('\n');
+  for (i = 0, len = ref.length; i < len; i++) {
+    line = ref[i];
+    // macOS: ? (192.168.178.88) at 08:F9:E0:62:5B:FB	 on en0
+    match = line.match(/\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-fA-F:.-]+)/);
+    if (match) {
+      ip = match[1];
+      lineMac = normalizeMac(match[2]);
+      if (lineMac === normalized) {
+        return ip;
+      }
+    }
+  }
+  return null;
+};
+
 hexify = function(brightness, temperature) {
   var hex, setting;
   setting = [128, 5, 3, 2];
@@ -87,8 +122,20 @@ hexify = function(brightness, temperature) {
 };
 
 parse_and_execute = async function(options) {
-  var initCommand, ipAddress;
-  if (options.host != null) {
+  var brightness, host, initCommand, ipAddress, ref, ref1, temperature;
+  host = options.mac ? resolveMacToIp(options.mac) : options.host;
+  if (options.mac && !host) {
+    console.log(chalk.red(`MAC ${options.mac} not found in ARP table. Use the Neewer app or ping the light once so it appears.`));
+    return;
+  }
+  if (!host) {
+    console.log(chalk.red("Provide -h/--host (light IP) or -m/--mac (light MAC) to run."));
+    return;
+  }
+  if (host != null) {
+    if (options.mac != null) {
+      console.log(chalk.green(`Resolved ${options.mac} -> ${host}`));
+    }
     if (options.client_ip != null) {
       ipAddress = options.client_ip;
       console.log(chalk.green(`Using ${ipAddress} as the local IP address`));
@@ -104,7 +151,7 @@ parse_and_execute = async function(options) {
     initCommand = `80021000000d${convertIp(ipAddress)}2e`;
     // console.log initCommand 
     command_queue.append([initCommand, initCommand, initCommand]);
-    console.log(`${chalk.yellow("Light Host:")} ${options.host}:${PORT}`);
+    console.log(`${chalk.yellow("Light Host:")} ${host}:${PORT}`);
     if (options.hex != null) {
       console.log(`${chalk.red("Hex Override:")} ${options.hex}`);
       // send options.host, PORT, options.hex
@@ -124,16 +171,20 @@ parse_and_execute = async function(options) {
             console.log(chalk.red(`Invalid power state '${options.power.toLowerCase()}'. Valid states are 'on' and 'off' only.`));
         }
       }
-      if ((options.brightness != null) && (options.temperature != null)) {
-        console.log(chalk.yellow(`Set brightness to ${options.brightness}% and temperature to ${options.temperature}00K`));
-        command_queue.append(hexify(options.brightness, options.temperature));
-      } else {
-        console.log(chalk.red("When setting brightness or temperature, BOTH parameters are required."));
+      if ((options.brightness != null) || (options.temperature != null)) {
+        brightness = (ref = options.brightness) != null ? ref : 100;
+        temperature = (ref1 = options.temperature) != null ? ref1 : 50;
+        if (options.brightness == null) {
+          console.log(chalk.yellow(`Brightness not set, using default ${brightness}%`));
+        }
+        if (options.temperature == null) {
+          console.log(chalk.yellow(`Temperature not set, using default ${temperature}00K`));
+        }
+        console.log(chalk.yellow(`Set brightness to ${brightness}% and temperature to ${temperature}00K`));
+        command_queue.append(hexify(brightness, temperature));
       }
     }
-    return (await send(options.host, PORT));
-  } else {
-    return console.log(chalk.red("No options provided. Did not run."));
+    return (await send(host, PORT));
   }
 };
 

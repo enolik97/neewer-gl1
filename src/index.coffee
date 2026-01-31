@@ -7,6 +7,7 @@ import chalk from "chalk"
 
 import program from 'commander'
 import os from 'os'
+import { execSync } from 'child_process'
 
 PORT = 5052
 
@@ -18,6 +19,7 @@ presets =
 program
 .version("Neewer GL1 Key Light Control 2.0")
 .option("-h, --host [char]")
+.option("-m, --mac [char]", "light MAC address (e.g. 08:F9:E0:62:5B:FB	); resolves IP from ARP so IP changes are OK")
 .option("-H, --hex [char]")
 .option("-I, --client_ip [char]")
 .option("-p, --power [off/on]")
@@ -70,6 +72,25 @@ guessIp = ()->
   addresses =  addresses.flatten().filter( {family: "IPv4"} )
   return addresses.first().address
 
+normalizeMac = (mac)->
+  hex = mac.toLowerCase().replace(/[^a-f0-9]/g, '')
+  hex.padStart(12, '0')
+
+resolveMacToIp = (mac)->
+  normalized = normalizeMac(mac)
+  try
+    output = execSync('arp -a', { encoding: 'utf8' })
+  catch
+    return null
+  for line in output.split('\n')
+    # macOS: ? (192.168.178.88) at 08:F9:E0:62:5B:FB	 on en0
+    match = line.match(/\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-fA-F:.-]+)/)
+    if match
+      ip = match[1]
+      lineMac = normalizeMac(match[2])
+      return ip if lineMac is normalized
+  null
+
 hexify = (brightness, temperature)->
   setting = [128,5,3,2]
   setting.append [parseInt(brightness),parseInt(temperature)]
@@ -79,8 +100,16 @@ hexify = (brightness, temperature)->
   return hex.join("")
 
 parse_and_execute = (options)->
-  if options.host?
-    
+  host = if options.mac then resolveMacToIp(options.mac) else options.host
+  if options.mac and not host
+    console.log chalk.red("MAC #{options.mac} not found in ARP table. Use the Neewer app or ping the light once so it appears.")
+    return
+  if not host
+    console.log chalk.red("Provide -h/--host (light IP) or -m/--mac (light MAC) to run.")
+    return
+  if host?
+    if options.mac?
+      console.log chalk.green("Resolved #{options.mac} -> #{host}")
     if options.client_ip?
       ipAddress = options.client_ip
       console.log chalk.green("Using #{ipAddress} as the local IP address")
@@ -98,7 +127,7 @@ parse_and_execute = (options)->
     command_queue.append [ initCommand, initCommand, initCommand ]
     
 
-    console.log "#{chalk.yellow("Light Host:")} #{options.host}:#{PORT}"
+    console.log "#{chalk.yellow("Light Host:")} #{host}:#{PORT}"
     if options.hex?
       console.log "#{chalk.red("Hex Override:")} #{options.hex}"
       # send options.host, PORT, options.hex
@@ -116,13 +145,13 @@ parse_and_execute = (options)->
           else
             console.log chalk.red("Invalid power state '#{options.power.toLowerCase()}'. Valid states are 'on' and 'off' only.")
       
-      if options.brightness? && options.temperature?  
-        console.log chalk.yellow("Set brightness to #{options.brightness}% and temperature to #{options.temperature}00K")
-        command_queue.append hexify(options.brightness, options.temperature)
-      else
-        console.log chalk.red("When setting brightness or temperature, BOTH parameters are required.")
-    await send options.host, PORT
-  else
-    console.log chalk.red("No options provided. Did not run.")
+      if options.brightness? or options.temperature?
+        brightness = options.brightness ? 100
+        temperature = options.temperature ? 50
+        console.log chalk.yellow("Brightness not set, using default #{brightness}%") if not options.brightness?
+        console.log chalk.yellow("Temperature not set, using default #{temperature}00K") if not options.temperature?
+        console.log chalk.yellow("Set brightness to #{brightness}% and temperature to #{temperature}00K")
+        command_queue.append hexify(brightness, temperature)
+    await send host, PORT
 
 parse_and_execute(options)
