@@ -9,19 +9,19 @@ By being able to control the light using a script, you can integrate controls wi
 As of Version 2.0.0, you no longer need to keep the Neewer Live application running for it to work. In any case, the Neewer Live app on windows is a raging dumpster fire. If for whatever reason the app crashes, or your computer crashes, the app will stop working, because the `DeviceInfo.xml` and/or `UserInfo.xml` file(s) will be corrupted. That's because the executable is constantly updating those files, *and* requires them for operation. The application does not self-heal those files once they're corrupted. You basically need to back up those files and copy them back in when something goes wrong.
 
 
-In order to use this script, you need either the light’s IP address or hostname (`-h`) or its MAC address (`-m`). You can get the IP after configuring the light with the Neewer mobile app (though not within the app), or from your router or Wireshark. Using `-m` (MAC) looks up the current IP from your ARP table, so the light’s IP can change (e.g. DHCP) and the script still finds it—as long as something has talked to the light recently (this script or the Neewer app). You will also need to know the IP address of your computer, which is easy enough (`ipconfig getifaddr en0`).
+In order to use this script, you need either the light’s IP address or hostname (`-h`) or its MAC address (`-m`). You can get the IP after configuring the light with the Neewer mobile app (though not within the app), or from your router or Wireshark. Using `-m` (MAC) looks up the current IP from your ARP table, so the light’s IP can change (e.g. DHCP) and the script still finds it—as long as something has talked to the light recently (this script or the Neewer app). You will also need the IP address of your computer for the handshake. If you don't pass `-I`, the script tries to detect it (first non-loopback IPv4). If that fails (e.g. multiple interfaces or VPN), set it explicitly with `-I` (e.g. `ipconfig getifaddr en0` on macOS, or your router's client list).
 
 ## Parameters
 
 ```
 -h, --host [char] light IP or hostname (use -h OR -m)
 -m, --mac [char] light MAC address (e.g. 08:F9:E0:62:5B:FB	). Resolves IP from your ARP table so the light’s IP can change (DHCP). Use -h OR -m.
--I, --client_ip [char] your computer's IP. If you don't provide it, the script will try to guess your IP (first one it finds)
+-I, --client_ip [char] your computer's IP. If you don't provide it, the script guesses (first non-loopback IPv4). If detection fails, you must set it with -I (e.g. -I 192.168.178.165).
 -H, --hex
 -p, --power [on,off]
--b, --brightness 1-100 (optional; default 100 if only -t is set)
--t, --temperature 29-70 (optional; default 50 = 5000K if only -b is set)
--d, --delay [int] in milliseconds. Default is 500. YMMV if you shorten the delay. The script may run faster, but may not execute.
+-b, --brightness 1-100 (requires -t when used)
+-t, --temperature 29-70 (requires -b when used; 50 = 5000K)
+-d, --delay [int] in milliseconds. Default is 50. YMMV if you shorten the delay. The script may run faster, but may not execute.
 ```
 
 You can generally mix and match the parameters as required, with exceptions:
@@ -70,10 +70,8 @@ node index.mjs -h 192.168.1.236 -H 800503020a32c6
 node index.mjs -m 08:F9:E0:62:5B:FB	 -p on -I 192.168.178.165
 node index.mjs -m 08:F9:E0:62:5B:FB	 -p off
 
-# set only brightness (temperature defaults to 5000K)
-node index.mjs -h 192.168.1.236 -b 50
-# set only temperature (brightness defaults to 100%)
-node index.mjs -h 192.168.1.236 -t 33
+# set brightness and temperature (both required)
+node index.mjs -h 192.168.1.236 -b 50 -t 33
 
 ```
 
@@ -88,22 +86,22 @@ I'm not sure how the Neewer Live app scans the network for the lights, but to co
 
 To reverse engineer the protocol, you can watch traffic between your computer and the light using Wireshark.
 
-You'll notice that there's an initializing handshake between Neewer Live and your light, where it sends a message three times, and then the app sends a constant stream of short heartbeat messages afterwards.
+You'll notice that there's an initializing handshake between Neewer Live and your light, where it sends a message three times, the light replies with `80:03` to accept the handshake, and then the app can send commands. This script does the same: it sends three handshake messages, waits for the light's `80:03` reply, then sends power/brightness/temperature commands on the same socket.
 
-The light never sends any information back, so if you change your light settings manually, your light will be out of sync with the app's state for the light.
+The light does not report status (e.g. current brightness), so if you change settings manually on the light, the app/script has no way to know. It does send a brief `80:03` reply to accept the handshake.
 
-I eventually realized that the command structure works like this:
+The command structure works like this:
 
-1. Your computer sends three UDP hex messages containing your computer's IP in succession.
-2. You can send any command or a heartbeat to the light to keep the window for the light to receive commands from your computer's IP open.
-3. If no heartbeat command is received within a certain time window, then any further commands are rejected unless you resend the commands in #1.
+1. Your computer sends three UDP handshake messages (containing your computer's IP) in succession. The light replies with `80:03` when it accepts the handshake.
+2. After that, you can send power, brightness, or temperature commands on the same socket. The script waits for `80:03` before sending these.
+3. If no command is received within a certain time window, the light may close the session and you must repeat the handshake (steps 1–2).
 
-There is a finite time window for a command to be received. If it's too fast or too slow, then the commands will be rejected. I could not be bothered to figure out this exact timing (but it is 4-5 times per second), as I only care that the script works for my uses. I have included an overridable delay between issuing UDP requests, defaulted to 500ms. I have found setting it shorter can result in faster response times for the light, but missed commands too. YMMV.
+There is a finite time window for a command to be received. If it's too fast or too slow, then the commands will be rejected. I could not be bothered to figure out this exact timing (but it is 4-5 times per second), as I only care that the script works for my uses. I have included an overridable delay between issuing UDP requests, defaulted to 50ms. I have found setting it shorter can result in faster response times for the light, but missed commands too. YMMV.
 
 
 ### Commands
 
-The handshake/wakeup command looks like this: `80021000000d3139322e3136382e312e3130382e` for client IP address 192.168.1.108. The structure of the message is `80 02 10 00 00 0d [ip ascii to hex]`, terminated by `2e`
+The handshake/wakeup command has the structure `80 02 12 00 00 0f [your IP as 15 ASCII chars, each as hex] [checksum]`, where the checksum is the low byte of the sum of all preceding bytes (e.g. for IP 192.168.1.108 the payload is the ASCII bytes of that string as hex, plus the checksum byte).
 
 To turn on the light, you send the hexadecimal code `800502010189` over UDP. 
 To turn off the light, you send the hexadecimal code `800502010088` over UDP.

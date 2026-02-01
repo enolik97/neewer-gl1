@@ -1,6 +1,6 @@
 // import dgram from 'dgram'
 // dgram with promises
-var PORT, command_delay, command_queue, convertIp, guessIp, hexify, normalizeMac, options, parse_and_execute, presets, resolveMacToIp, send;
+var PORT, buildHandshake, command_delay, command_queue, guessIp, hexify, normalizeMac, options, parse_and_execute, presets, resolveMacToIp, send;
 
 import {
   DgramAsPromised
@@ -27,7 +27,7 @@ presets = {
   "off": "800502010088"
 };
 
-program.version("Neewer GL1 Key Light Control 2.0").option("-h, --host [char]").option("-m, --mac [char]", "light MAC address (e.g. 08:F9:E0:62:5B:FB	); resolves IP from ARP so IP changes are OK").option("-H, --hex [char]").option("-I, --client_ip [char]").option("-p, --power [off/on]").option("-b, --brightness [int]").option("-t, --temperature [int]").option("-d, --delay [int]").parse(process.argv);
+program.version("Neewer GL1 Key Light Control 2.0").option("-h, --host [char]").option("-m, --mac [char]", "light MAC address (e.g. 08:F9:E0:62:5B:FB); resolves IP from ARP so IP changes are OK").option("-H, --hex [char]").option("-I, --client_ip [char]").option("-p, --power [off/on]").option("-b, --brightness [int]").option("-t, --temperature [int]").option("-d, --delay [int]").parse(process.argv);
 
 // Default command prints out a list of ports
 program.parse();
@@ -38,45 +38,89 @@ command_queue = [];
 
 command_delay = 50;
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 send = async function(host, port) {
-  var bytes, client, closed, hexCommand, message;
+  var bytes, client, hexCommand, message;
+  if (command_queue.length === 0) {
+    console.log("Command queue is empty! Done.");
+    return;
+  }
   client = DgramAsPromised.createSocket('udp4');
-  if (command_queue.length > 0) {
-    hexCommand = command_queue.shift();
-    message = new Buffer.from(hexCommand, "hex");
-    bytes = (await client.send(message, 0, message.length, port, host)); //, (err, bytes) ->
-    console.log(chalk.blue(`Sent command [${hexCommand}] (${bytes} bytes) to ${host}:${port}`));
-    
-    closed = (await client.close());
-    // console.log "Connection closed. Going to next in queue."
-    // prevent commands from being issued too quickly
-    return send.delay(command_delay, host, port);
-  } else {
-    return console.log(chalk.green("Command queue is empty! Done."));
+  await client.bind(port, '0.0.0.0');
+
+  const rawSocket = client.socket;
+  const waitFor8003Reply = () =>
+    new Promise((resolve) => {
+      const onMessage = (msg) => {
+        if (msg.length >= 2 && msg[0] === 0x80 && msg[1] === 0x03) {
+          rawSocket.off("message", onMessage);
+          resolve();
+        }
+      };
+      rawSocket.on("message", onMessage);
+    });
+
+  try {
+    // Send handshake packets (first 3 in queue) with 50ms between each
+    for (var i = 0; i < 3 && command_queue.length > 0; i++) {
+      hexCommand = command_queue.shift();
+      message = Buffer.from(hexCommand, "hex");
+      await client.send(message, 0, message.length, port, host);
+      console.log(`Sent handshake [${hexCommand}] to ${host}:${port}`);
+      if (i < 2) await delay(command_delay);
+    }
+
+    // Wait for light's 80:03 reply before sending power/other commands
+    await waitFor8003Reply();
+    console.log("Received 80:03 reply from light.");
+
+    // Send remaining commands (power, brightness/temp, etc.) on same socket
+    while (command_queue.length > 0) {
+      hexCommand = command_queue.shift();
+      message = Buffer.from(hexCommand, "hex");
+      bytes = await client.send(message, 0, message.length, port, host);
+      console.log(`Sent message [${hexCommand}] (${bytes} bytes) to ${host}:${port}`);
+      await delay(command_delay);
+    }
+  } finally {
+    await client.close();
+    console.log("Connection closed. Done.");
   }
 };
 
-convertIp = function(ip) {
-  var ascii, hexified, segments;
-  segments = ip.split(".");
-  ascii = segments.map;
-  hexified = Array.from(ip).map(function(char, index) {
-    return char.charCodeAt(0).toString(16);
+// Same handshake as index.mjs: 80 02 12 00 00 0f [IP 15 chars as hex] [checksum = sum of all bytes & 0xff]
+buildHandshake = function(ip) {
+  var all, checksum, header, headerHex, ipBytes, ipHex, sum;
+  header = [0x80, 0x02, 0x12, 0x00, 0x00, 0x0f];
+  ipBytes = Array.from(ip).map(function(c) {
+    return c.charCodeAt(0);
   });
-  return hexified.join("");
+  all = header.concat(ipBytes);
+  sum = all.reduce(function(a, b) {
+    return a + b;
+  }, 0);
+  checksum = (sum & 0xff).toString(16).padStart(2, "0");
+  headerHex = header.map(function(b) {
+    return b.toString(16).padStart(2, "0");
+  }).join("");
+  ipHex = Array.from(ip).map(function(c) {
+    return c.charCodeAt(0).toString(16);
+  }).join("");
+  return `${headerHex}${ipHex}${checksum}`;
 };
 
 guessIp = function() {
-  var addresses, nics;
+  var addresses, nics, ref;
   nics = os.networkInterfaces();
   addresses = [];
   Object.keys(nics).forEach(function(key) {
     return addresses.push(nics[key]);
   });
-  addresses = addresses.flatten().filter({
-    family: "IPv4"
+  addresses = addresses.flatten().filter(function(addr) {
+    return addr.family === "IPv4" && addr.address !== "127.0.0.1";
   });
-  return addresses.first().address;
+  return (ref = addresses.first()) != null ? ref.address : void 0;
 };
 
 normalizeMac = function(mac) {
@@ -122,7 +166,7 @@ hexify = function(brightness, temperature) {
 };
 
 parse_and_execute = async function(options) {
-  var brightness, host, initCommand, ipAddress, ref, ref1, temperature;
+  var host, initCommand, ipAddress;
   host = options.mac ? resolveMacToIp(options.mac) : options.host;
   if (options.mac && !host) {
     console.log(chalk.red(`MAC ${options.mac} not found in ARP table. Use the Neewer app or ping the light once so it appears.`));
@@ -141,15 +185,17 @@ parse_and_execute = async function(options) {
       console.log(chalk.green(`Using ${ipAddress} as the local IP address`));
     } else {
       ipAddress = guessIp();
+      if (!ipAddress) {
+        console.log(chalk.red("Could not determine your computer's IP (no non-loopback IPv4). Use -I to set it (e.g. -I 192.168.178.165)."));
+        return;
+      }
       console.log(chalk.yellow(`client_ip not provided, using ${ipAddress} as the local IP address`));
     }
     if (options.delay != null) {
       command_delay = options.delay;
     }
     console.log(`Command delay set to ${command_delay}ms`);
-    //init command
-    initCommand = `80021000000d${convertIp(ipAddress)}2e`;
-    // console.log initCommand 
+    initCommand = buildHandshake(ipAddress);
     command_queue.append([initCommand, initCommand, initCommand]);
     console.log(`${chalk.yellow("Light Host:")} ${host}:${PORT}`);
     if (options.hex != null) {
@@ -172,16 +218,13 @@ parse_and_execute = async function(options) {
         }
       }
       if ((options.brightness != null) || (options.temperature != null)) {
-        brightness = (ref = options.brightness) != null ? ref : 100;
-        temperature = (ref1 = options.temperature) != null ? ref1 : 50;
-        if (options.brightness == null) {
-          console.log(chalk.yellow(`Brightness not set, using default ${brightness}%`));
+        if ((options.brightness != null) && (options.temperature != null)) {
+          console.log(chalk.yellow(`Set brightness to ${options.brightness}% and temperature to ${options.temperature}00K`));
+          command_queue.append(hexify(options.brightness, options.temperature));
+        } else {
+          console.log(chalk.red("When setting brightness or temperature, BOTH parameters are required."));
+          return;
         }
-        if (options.temperature == null) {
-          console.log(chalk.yellow(`Temperature not set, using default ${temperature}00K`));
-        }
-        console.log(chalk.yellow(`Set brightness to ${brightness}% and temperature to ${temperature}00K`));
-        command_queue.append(hexify(brightness, temperature));
       }
     }
     return (await send(host, PORT));
